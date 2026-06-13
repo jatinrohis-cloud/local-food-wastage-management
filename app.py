@@ -14,53 +14,61 @@ st.title("🍲 Local Food Wastage Management System Dashboard")
 st.markdown("### Production Analytical Workspace | Real-Time Supply & Demand Matrix Optimization")
 st.write("---")
 
-# --- STEP 2: IN-MEMORY DATABASE HANDSHAKE EMULATION ---
-@st.cache_resource
-def load_and_initialize_database():
-    """Reads processed storage vectors and establishes an analytical runtime layer."""
-    # Using local cleaned data streams
-    providers_df = pd.read_csv("providers_clean.csv")
-    receivers_df = pd.read_csv("receivers_clean.csv")
-    listings_df = pd.read_csv("food_listings_clean.csv")
-    claims_df = pd.read_csv("claims_clean.csv")
-    
-    # Establish local transactional environment
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    providers_df.to_sql("providers", conn, index=False, if_exists="replace")
-    receivers_df.to_sql("receivers", conn, index=False, if_exists="replace")
-    listings_df.to_sql("food_listings", conn, index=False, if_exists="replace")
-    claims_df.to_sql("claims", conn, index=False, if_exists="replace")
-    return conn
+# --- STEP 2: RAW DATASET LOADING ENGINE ---
+@st.cache_data
+def load_raw_data_sources():
+    """Reads processing source storage files directly from the repository root."""
+    try:
+        providers_df = pd.read_csv("providers_data.csv")
+        receivers_df = pd.read_csv("receivers_data.csv")
+        listings_df = pd.read_csv("food_listings_data.csv")
+        claims_df = pd.read_csv("claims_data.csv")
+        return providers_df, receivers_df, listings_df, claims_df
+    except Exception as e:
+        st.error(f"⚠️ Data Sourcing Error: {e}")
+        st.info("Ensure providers_data.csv, receivers_data.csv, food_listings_data.csv, and claims_data.csv exist in your root directory.")
+        st.stop()
 
-try:
-    db_connection = load_and_initialize_database()
-except Exception as e:
-    st.error(f"⚠️ Infrastructure Initialization Aborted: {e}")
-    st.info("Ensure providers_clean.csv, receivers_clean.csv, food_listings_clean.csv, and claims_clean.csv exist in your running path.")
-    st.stop()
+providers_raw, receivers_raw, listings_raw, claims_raw = load_raw_data_sources()
 
-# --- STEP 3: SIDEBAR CONTROL ENGINE & SYSTEM FILTERS ---
+# --- STEP 3: SIDEBAR CONTROL PANEL & FILTERS ---
 st.sidebar.header("🛠️ Dashboard Control Panel")
 
-# Pull filter criteria parameters directly from the DB schema
-available_cities = pd.read_sql("SELECT DISTINCT Location FROM food_listings ORDER BY Location", db_connection)["Location"].tolist()
-available_provider_types = pd.read_sql("SELECT DISTINCT Provider_Type FROM food_listings ORDER BY Provider_Type", db_connection)["Provider_Type"].tolist()
-available_meal_types = pd.read_sql("SELECT DISTINCT Meal_Type FROM food_listings ORDER BY Meal_Type", db_connection)["Meal_Type"].tolist()
-available_food_types = pd.read_sql("SELECT DISTINCT Food_Type FROM food_listings ORDER BY Food_Type", db_connection)["Food_Type"].tolist()
+# Pull filter criteria parameters directly from the raw frames safely
+available_cities = sorted(listings_raw["Location"].dropna().unique().tolist())
+available_provider_types = sorted(listings_raw["Provider_Type"].dropna().unique().tolist())
+available_meal_types = sorted(listings_raw["Meal_Type"].dropna().unique().tolist())
+available_food_types = sorted(listings_raw["Food_Type"].dropna().unique().tolist())
 
-# Render Multi-Select Widgets with comprehensive default coverage
+# Render Multi-Select Widgets with initial default coverage selections
 selected_cities = st.sidebar.multiselect("📍 Filter by City Location", available_cities, default=available_cities[:3])
 selected_provider_types = st.sidebar.multiselect("🏢 Filter by Provider Type", available_provider_types, default=available_provider_types)
 selected_meal_types = st.sidebar.multiselect("⏰ Filter by Meal Time Windows", available_meal_types, default=available_meal_types)
 selected_food_types = st.sidebar.multiselect("🥦 Filter by Dietary Food Type", available_food_types, default=available_food_types)
 
-# If an operator clears a field selection, default to full structural scope to prevent runtime crash
+# If an operator clears a field selection, default to full structural scope to prevent crash
 filter_cities = selected_cities if selected_cities else available_cities
 filter_providers = selected_provider_types if selected_provider_types else available_provider_types
 filter_meals = selected_meal_types if selected_meal_types else available_meal_types
 filter_foods = selected_food_types if selected_food_types else available_food_types
 
-# --- STEP 4: FILTERED DATAFRAME COMPILATION ---
+# --- STEP 4: PRE-FILTERING DATA AND IN-MEMORY DATABASE HANDSHAKE ---
+# Filtering listings dataset natively via pandas to handle column key mappings perfectly
+filtered_listings = listings_raw[
+    (listings_raw["Location"].isin(filter_cities)) &
+    (listings_raw["Provider_Type"].isin(filter_providers)) &
+    (listings_raw["Meal_Type"].isin(filter_meals)) &
+    (listings_raw["Food_Type"].isin(filter_foods))
+]
+
+# Re-instantiate local transactional SQL environment based on active selections
+conn = sqlite3.connect(":memory:", check_same_thread=False)
+providers_raw.to_sql("providers", conn, index=False, if_exists="replace")
+receivers_raw.to_sql("receivers", conn, index=False, if_exists="replace")
+filtered_listings.to_sql("food_listings", conn, index=False, if_exists="replace")
+claims_raw.to_sql("claims", conn, index=False, if_exists="replace")
+
+# Compile full relational table matrix view using an explicit join
 base_query = """
     SELECT 
         f.Food_ID, f.Food_Name, f.Quantity, f.Expiry_Date, f.Location as City, 
@@ -70,26 +78,14 @@ base_query = """
     LEFT JOIN providers p ON f.Provider_ID = p.Provider_ID
     LEFT JOIN claims c ON f.Food_ID = c.Food_ID
     LEFT JOIN receivers r ON c.Receiver_ID = r.Receiver_ID
-    WHERE f.Location IN ({})
-      AND f.Provider_Type IN ({})
-      AND f.Meal_Type IN ({})
-      AND f.Food_Type IN ({})
 """
-
-# Dynamic parameter injection strings to protect runtime syntax compilation
-city_placeholders = ",".join([f"'{c}'" for c in filter_cities])
-provider_placeholders = ",".join([f"'{p}'" for p in filter_providers])
-meal_placeholders = ",".join([f"'{m}'" for m in filter_meals])
-food_placeholders = ",".join([f"'{f}'" for f in filter_foods])
-
-formatted_query = base_query.format(city_placeholders, provider_placeholders, meal_placeholders, food_placeholders)
-master_df = pd.read_sql(formatted_query, db_connection)
+master_df = pd.read_sql(base_query, conn)
 
 # --- STEP 5: KEY PERFORMANCE INDICATOR (KPI) METRICS ---
 col1, col2, col3, col4 = st.columns(4)
 
-total_items = len(master_df["Food_ID"].unique())
-total_qty = int(master_df["Quantity"].sum()) if len(master_df) > 0 else 0
+total_items = len(master_df["Food_ID"].unique()) if len(master_df) > 0 else 0
+total_qty = int(master_df["Quantity"].unique().sum()) if len(master_df) > 0 else 0
 completed_claims = len(master_df[master_df["Claim_Status"] == "Completed"])
 success_rate = round((completed_claims / len(master_df) * 100), 2) if len(master_df) > 0 else 0.0
 
@@ -117,7 +113,7 @@ with chart_col1:
                           labels={"Quantity": "Units Allocated"}, template="plotly_white")
         st.plotly_chart(fig_city, use_container_width=True)
     else:
-        st.info("No records match configuration parameters.")
+        st.info("No records match current configuration filters.")
 
 with chart_col2:
     st.markdown("#### Demand Velocity Breakdown (Total Claims Generated by Meal Type)")
@@ -128,7 +124,7 @@ with chart_col2:
                           hole=0.4, color_discrete_sequence=px.colors.sequential.RdBu)
         st.plotly_chart(fig_meal, use_container_width=True)
     else:
-        st.info("No records match configuration parameters.")
+        st.info("No records match current configuration filters.")
 
 chart_col3, chart_col4 = st.columns(2)
 
@@ -140,7 +136,7 @@ with chart_col3:
                            labels={"Quantity": "Volume Sum", "Food_Type": "Diet Category Pattern"}, template="plotly_white")
         st.plotly_chart(fig_diet, use_container_width=True)
     else:
-        st.info("No records match configuration parameters.")
+        st.info("No records match current configuration filters.")
 
 with chart_col4:
     st.markdown("#### Active System Claims Operations Tracking Status")
@@ -150,7 +146,7 @@ with chart_col4:
         fig_status = px.funnel(status_df, x="Record Count", y="Status", color="Status")
         st.plotly_chart(fig_status, use_container_width=True)
     else:
-        st.info("No records match configuration parameters.")
+        st.info("No records match current configuration filters.")
 
 st.write("---")
 
